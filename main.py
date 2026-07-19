@@ -9,7 +9,11 @@ import numpy as np
 import paho.mqtt.client as mqtt
 import json 
 from aiortc.contrib.media import MediaPlayer
-from multiprocessing import shared_memory
+import mmap
+import struct
+import time 
+import os 
+import zmq 
 
 offer_received = asyncio.Event()
 connection_closed = asyncio.Event()
@@ -17,7 +21,7 @@ offer_data = None
 loop = None 
 currently_connected = False
 pc = None
-shm_img = shared_memory.SharedMemory(name="video_frame", create=True, size=1280*720*3)
+
 class DummyVideoTrack(VideoStreamTrack):
     def __init__(self):
         super().__init__()
@@ -70,13 +74,12 @@ async def consume_track(track):
             frame = await track.recv()
             img = frame.to_ndarray(format="bgr24")
             rsz_img = cv2.resize(img, (1280, 720))
-            flattened_img = rsz_img.flatten()
-            shm_img.buf[:flattened_img.nbytes] = flattened_img
-
-            # cv2.imshow(f"Remote Video ({track.id})", img)
-            # if cv2.waitKey(1) & 0xFF == ord('q'):
-            #     break
-
+            height, width, channels = rsz_img.shape
+            raw_bytes = rsz_img.tobytes()
+            # Send metadata first (or wrap it in a multipart message)
+            # For simplicity, send a multipart message: [header, raw_bytes]
+            header = f"{width},{height},{channels}".encode('utf-8')
+            socket.send_multipart([header, raw_bytes])
     except asyncio.CancelledError:
         print("Track consumption stopped.")
     except Exception as e:
@@ -244,7 +247,10 @@ def on_message(client, userdata, msg):
 if __name__ == "__main__":    
     try:
         global mqttc
-        
+        global socket
+        socket = zmq.Context().socket(zmq.PUSH)
+        endpoint = "ipc:///tmp/zmq_pubsub.ipc"
+        socket.bind(endpoint)
         mqttc = mqtt.Client(mqtt.CallbackAPIVersion.VERSION2)
         mqttc.on_connect = on_connect
         mqttc.on_message = on_message
@@ -256,9 +262,5 @@ if __name__ == "__main__":
         asyncio.run(run_host())
     except KeyboardInterrupt:
         print("Interrupted by user, shutting down...")
-        shm_img.close()
-        shm_img.unlink()
     except Exception as e:
         print(f"Unexpected error: {e}")
-        shm_img.close()
-        shm_img.unlink()
