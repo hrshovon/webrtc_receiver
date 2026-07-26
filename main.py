@@ -488,7 +488,7 @@ async def run_host():
             # Wait until connection fails or is closed
             connection_done = asyncio.Event()
             connecting_start_time = None
-            CONNECTING_TIMEOUT = 60  # seconds
+            CONNECTING_TIMEOUT = 10  # seconds
             
             def on_state_change():
                 nonlocal connecting_start_time
