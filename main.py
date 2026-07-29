@@ -325,23 +325,50 @@ class RealVideoTrack(VideoStreamTrack):
         super().__init__()
         self.counter = 0
         self.cap = cv2.VideoCapture(0)
-        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
-        self.dummy_frame = np.zeros((480,640,3), dtype=np.uint8)
+        self.cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*'MJPG'))
+        self.cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1280)
+        self.cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 720)
+        self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)  # Minimize buffer to reduce latency
+        self.dummy_frame = np.zeros((720,1280,3), dtype=np.uint8)
         if not self.cap.isOpened():
             raise IOError("Could not open camera")
+        print(f"RealVideoTrack initialized: camera opened successfully")
+    
+    def _read_frame(self):
+        """Synchronous frame read - runs in executor to avoid blocking event loop"""
+        ret, frame = self.cap.read()
+        return ret, frame
     
     async def recv(self):
         pts, time_base = await self.next_timestamp()
-        ret, frame = self.cap.read()
-        if ret:
+        
+        # Run blocking cap.read() in executor to avoid blocking the event loop
+        try:
+            ret, frame = await asyncio.get_event_loop().run_in_executor(
+                None, self._read_frame
+            )
+        except Exception as e:
+            print(f"Error reading frame from camera: {e}")
+            ret, frame = False, None
+        
+        if ret and frame is not None:
             v_frame = VideoFrame.from_ndarray(frame, format="bgr24")
+            if self.counter % 100 == 0:
+                print(f"RealVideoTrack: captured frame {self.counter}, shape={frame.shape}")
         else:
+            if self.counter % 30 == 0:
+                print(f"RealVideoTrack: frame read failed (ret={ret}), sending dummy frame")
             v_frame = VideoFrame.from_ndarray(self.dummy_frame, format="bgr24")
         self.counter += 1
         v_frame.pts = pts
         v_frame.time_base = time_base
         return v_frame
+    
+    def stop(self):
+        super().stop()
+        if self.cap is not None:
+            self.cap.release()
+            print("RealVideoTrack: camera released")
 
 
 def send_img_to_zmq(img):
@@ -408,7 +435,7 @@ def setup_peer_connection():
         ]
     )
     pc = RTCPeerConnection(configuration=config)
-    local_video_track = DummyVideoTrack()
+    local_video_track = RealVideoTrack()
     local_audio_track = MicrophoneAudioTrack()
     pc.addTrack(local_video_track)
     pc.addTrack(local_audio_track)
